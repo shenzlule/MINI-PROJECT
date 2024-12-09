@@ -17,12 +17,17 @@
 
   4. millis(): Provides system uptime in milliseconds.
      Useful for time-based operations.
+
+  5. _BV(x): A macro that returns a byte value with bit x set.
+     Commonly used in register bit manipulations.
+
+ 
 */
 
-#define SensorPin 0 // Analog channel for TMP (LM35) output
+#define SensorPin 0 // Analog channel for TB meter output
 
 unsigned long avgValue;    // Pointer to store the average value of the sensor feedback
-float voltage, temperature;
+float voltage, turbidity;
 int buf[10], temp;
 unsigned long previousMillis = 0;
 const unsigned long samplingInterval = 100;
@@ -69,9 +74,10 @@ void processSamples(int *buffer, unsigned long *average) {
   *average /= 6;
 }
 
-void calculateTemperature(float *voltage, float *temperature, unsigned long avgValue) {
+void calculateTurbidity(float *voltage, float *turbidity, unsigned long avgValue) {
   *voltage = (float)avgValue * 5.0 / 1024;
-  *temperature = *voltage * 100; // LM35 outputs 10mV per °C
+  *turbidity = -1333.33 * (*voltage) + 5333.33;
+  *turbidity = max(*turbidity, 0); // Clamp negative turbidity to 0
 }
 
 void loop() {
@@ -89,11 +95,11 @@ void loop() {
     // Process samples and calculate average
     processSamples(buf, &avgValue);
 
-    // Calculate temperature
-    calculateTemperature(&voltage, &temperature, avgValue);
+    // Calculate turbidity
+    calculateTurbidity(&voltage, &turbidity, avgValue);
 
     // Print the result
-    // Serial.print("TMP:");
-    Serial.println(temperature, 2);
+    // Serial.print("TB:");
+    Serial.println(turbidity);
   }
 }

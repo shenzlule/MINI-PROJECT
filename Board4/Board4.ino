@@ -1,117 +1,201 @@
-// This board collects data from the other boards and stores it in EEPROM.
-// UBRR0 sets the baud rate for receiving data, and UCSR0B enables the UART receiver.
-// UDR0 is used to read incoming data, one byte at a time.
-// The EEPROM control register (EECR) manages writing and reading operations.
-// EEAR specifies the memory address in EEPROM for reading or writing data.
-// EEDR temporarily holds data to be written to or read from EEPROM.
-// writeEEPROM() writes data byte-by-byte to EEPROM at specified addresses.
-// readEEPROM() retrieves stored data from EEPROM by accessing its address.
-// The loop reads incoming data, stores it in EEPROM, and checks thresholds for alarms.
-// EEPROM operations ensure the system logs data persistently, even after power loss.
-// Board 4: Central Controller
+#include "SoftwareSerial.h"
+#include <EEPROM.h>
 
-void setupSerial() {
-  // Configure serial for receiving
-  UBRR0H = 0;
-  UBRR0L = 103;
-  UCSR0B = (1 << RXEN0); // Enable Receiver
-}
+// Define pins for LEDs and buzzer
+#define BOARD_1_LED 9
+#define BOARD_2_LED 8
+#define BOARD_3_LED 7
+#define BUZZER 4
 
+// Thresholds for pH, NTU, and temperature
+const float PH_THRESHOLD = 7.5;       // Example threshold for pH
+const float NTU_THRESHOLD = 50.0;    // Example threshold for turbidity
+const float TEMP_THRESHOLD = 30.0;   // Example threshold for temperature
 
-uint8_t readSerial() {
-  while (!(UCSR0A & (1 << RXC0)));
-  return UDR0;
-}
+String incomingData = "";  // From master (9600 baud, for pH)
+String incomingData2 = ""; // From b2 (9600 baud, for NTU)
+String incomingData3 = ""; // From b3 (9600 baud, for temperature)
 
-void setupEEPROM() {
-  // Nothing specific needed for basic EEPROM usage
-}
+bool dataReady = false;
+bool dataReady_b2 = false;
+bool dataReady_b3 = false;
 
-void writeEEPROM(uint16_t address, uint8_t data) {
-  while (EECR & (1 << EEPE)); // Wait for EEPROM to be ready
-  EEAR = address;
-  EEDR = data;
-  EECR = (1 << EEMPE);
-  EECR |= (1 << EEPE);
-}
+unsigned long startb3 = 0;
+unsigned long startb2 = 0;
+unsigned long led_ph_time = 0;
+unsigned long led_tmp_time = 0;
+unsigned long led_tb_time = 0;
+unsigned long alertStartTime = 0;
+bool alertActive = false;
+bool ledtmp = false;
+bool ledtb = false;
+bool ledph = false;
 
-uint8_t readEEPROM(uint16_t address) {
-  while (EECR & (1 << EEPE)); // Wait for EEPROM to be ready
-  EEAR = address;
-  EECR |= (1 << EERE);
-  return EEDR;
-}
+// Define SoftwareSerial pins
+SoftwareSerial b2(10, 11); // TB sensor
+SoftwareSerial b3(2, 3);  // TMP sensor
 
 void setup() {
-  setupSerial();
-  setupEEPROM();
+  // Set up serial communications
+  Serial.begin(9600);
+  b2.begin(9600);
+  b3.begin(9600);
+
+  // Set up LEDs and buzzer
+  pinMode(BOARD_1_LED, OUTPUT);
+  pinMode(BOARD_2_LED, OUTPUT);
+  pinMode(BOARD_3_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+   led_ph_time=millis();
+   led_tb_time=millis();
+   led_tmp_time=millis();
+  Serial.println("Master Ready");
 }
-void processIncomingData() {
-  static uint8_t state = 0;
-  static uint8_t boardID = 0;
-  static uint16_t data = 0;
 
-  while (UCSR0A & (1 << RXC0)) { // Check if data is available
-    uint8_t byte = UDR0;
+void loop() {
+  // Read from master serial
+  startb3 = millis();
+  startb2 = millis();
+  readMasterData();
+  readB2Data();
+  readB3Data();
 
-    switch (state) {
-      case 0: // Waiting for Start Byte
-        if (byte == 0x7E) state = 1;
+  // Process data from master (pH)
+  if (dataReady) {
+    digitalWrite(BOARD_1_LED, HIGH);
+
+    processPHData();
+    ledph=true;
+  }
+
+  // Process data from b2 (TB sensor)
+  if (dataReady_b2) {
+    digitalWrite(BOARD_2_LED, HIGH);
+    processB2Data();
+   ledtb=true;
+  }
+
+  // Process data from b3 (TMP sensor)
+  if (dataReady_b3) {
+    digitalWrite(BOARD_3_LED, HIGH);
+    processB3Data();
+   ledtmp=true;
+  }
+
+
+   if(millis()-led_tmp_time >100 && ledtmp){
+     
+        digitalWrite(BOARD_3_LED, LOW);
+        ledtmp=false;
+        led_tmp_time=millis();
+
+   }
+   
+   if(millis()-led_tb_time >100 && ledtb){
+     
+        digitalWrite(BOARD_2_LED, LOW);
+          led_tb_time=millis();
+        ledtb=false;
+
+   }
+   
+   if(millis()-led_ph_time >100 && ledph){
+     
+        digitalWrite(BOARD_1_LED, LOW);
+        led_ph_time=millis();
+        ledph=false;
+
+   }
+  // Handle buzzer alerts without delay
+  handleAlert();
+}
+
+void readMasterData() {
+  while (Serial.available() > 0) {
+    char incomingChar = Serial.read();
+    if (incomingChar == '\n') {
+      dataReady = true;
+      break;
+    }
+    incomingData += incomingChar;
+  }
+}
+
+void readB2Data() {
+  b2.listen();
+  while (millis() - startb2 < 100) {
+    while (b2.available() > 0) {
+      char incomingChar = b2.read();
+      if (incomingChar == '\n') {
+        dataReady_b2 = true;
         break;
-
-      case 1: // Reading Board ID
-        boardID = byte;
-        state = 2;
-        break;
-
-      case 2: // Reading Data High Byte
-        data = (byte << 8);
-        state = 3;
-        break;
-
-      case 3: // Reading Data Low Byte
-        data |= byte;
-        state = 4;
-        break;
-
-      case 4: // Waiting for End Byte
-        if (byte == 0x7F) {
-          // Process data based on board ID
-          switch (boardID) {
-            case 1: // pH Sensor
-              processPHData(data);
-              break;
-            case 2: // Turbidity Sensor
-              processTurbidityData(data);
-              break;
-            case 3: // Temperature and Conductivity Sensor
-              processTempConductivityData(data);
-              break;
-          }
-        }
-        state = 0; // Reset state
-        break;
-
-      default:
-        state = 0; // Reset on error
-        break;
+      }
+      incomingData2 += incomingChar;
     }
   }
 }
 
-void loop() {
-  processIncomingData();
+void readB3Data() {
+  b3.listen();
+  while (millis() - startb3 < 100) {
+    while (b3.available() > 0) {
+      char incomingChar = b3.read();
+      if (incomingChar == '\n') {
+        dataReady_b3 = true;
+        break;
+      }
+      incomingData3 += incomingChar;
+    }
+  }
 }
 
-void processPHData(uint16_t phValue) {
-  // Handle pH data (e.g., store in EEPROM or analyze)
+void processPHData() {
+  float pH = incomingData.toFloat();
+  Serial.print("pH Level: ");
+  Serial.println(pH);
+  if (pH > PH_THRESHOLD) {
+    activateAlert();
+    EEPROM.write(2, 1); // Save pH alert to EEPROM
+  }
+  incomingData = "";
+  dataReady = false;
 }
 
-void processTurbidityData(uint16_t turbidityValue) {
-  // Handle turbidity data
+void processB2Data() {
+  float turbidity = incomingData2.toFloat();
+  Serial.print("Turbidity: ");
+  Serial.println(turbidity);
+  if (turbidity > NTU_THRESHOLD) {
+    activateAlert();
+    EEPROM.write(0, 1); // Save NTU alert to EEPROM
+  }
+  incomingData2 = "";
+  dataReady_b2 = false;
 }
 
-void processTempConductivityData(uint16_t combinedData) {
-  // Split and handle temperature and conductivity data if necessary
+void processB3Data() {
+  float temperature = incomingData3.toFloat();
+  Serial.print("Temperature: ");
+  Serial.println(temperature);
+  if (temperature > TEMP_THRESHOLD) {
+    activateAlert();
+    EEPROM.write(1, 1); // Save temperature alert to EEPROM
+  }
+  incomingData3 = "";
+  dataReady_b3 = false;
 }
 
+void activateAlert() {
+  alertActive = true;
+  alertStartTime = millis();
+  Serial.println("Active buzzer");
+  digitalWrite(BUZZER, HIGH);
+}
+
+void handleAlert() {
+  if (alertActive && (millis() - alertStartTime >= 400)) {
+    digitalWrite(BUZZER, LOW);
+    Serial.println("OFF buzzer");
+    alertActive = false;
+  }
+}
